@@ -548,7 +548,7 @@ components:
             type: string
             format: uuid
         critical_path_points:
-          description: Обчислюється алгоритмом 2.6.2 під час читання плану
+          description: Обчислюється алгоритмом 2.8.2 під час читання плану
           type: integer
           minimum: 0
         has_cycle:
