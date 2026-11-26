@@ -1,0 +1,673 @@
+openapi: 3.0.3
+info:
+  title: Multi-Agent Task Planning System — API Service
+  version: 1.0.0
+  description: >-
+    REST-контракт між контейнерами Web SPA та API Service (C4 Level 2).
+    Тривалі операції виконуються асинхронно: ендпоінти створення сеансу та прийняття
+    рішення повертають 202 Accepted, прогрес передається через Server-Sent Events.
+    Помилки повертаються у форматі Problem Details (RFC 9457).
+servers:
+  - url: https://localhost/api/v1
+    description: Docker Compose (Reverse Proxy)
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+  - name: Sessions
+  - name: Plans
+
+paths:
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshAccessToken
+      summary: Оновлення access JWT за refresh-токеном (SRS-FUN-02)
+      security: []
+      parameters:
+        - in: cookie
+          name: refresh_token
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Видано нову пару токенів; refresh-токен ротується в cookie
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+              description: refresh_token; HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessToken'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /projects/{projectId}/sessions:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [Sessions]
+      operationId: createSession
+      summary: Завантаження епіку та створення сеансу планування (SRS-FUN-04, SRS-FUN-05)
+      description: >-
+        Доступно ролям OWNER та PLANNER. Файл валідується за розміром і MIME-типом,
+        сеанс створюється зі статусом QUEUED, подія session.created записується в outbox
+        у тій самій транзакції.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Markdown або PDF з текстовим шаром, не більше 10 485 760 байт
+            encoding:
+              file:
+                contentType: text/markdown, application/pdf
+      responses:
+        '202':
+          description: Сеанс прийнято в обробку
+          headers:
+            Location:
+              schema:
+                type: string
+              description: /api/v1/sessions/{sessionId}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      tags: [Sessions]
+      operationId: listSessions
+      summary: Пагінований список сеансів проєкту
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - in: query
+          name: status
+          required: false
+          schema:
+            $ref: '#/components/schemas/SessionStatus'
+      responses:
+        '200':
+          description: Сторінка сеансів, відсортованих за created_at DESC
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /sessions/{sessionId}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [Sessions]
+      operationId: getSession
+      summary: Стан сеансу планування
+      responses:
+        '200':
+          description: Сеанс
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /sessions/{sessionId}/events:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [Sessions]
+      operationId: streamSessionEvents
+      summary: Потік подій прогресу сеансу (SRS-FUN-06)
+      description: >-
+        Server-Sent Events. Кожна подія має поле event (status_changed, node_completed,
+        heartbeat) та data у форматі SessionEvent. Підтримується заголовок Last-Event-ID.
+      parameters:
+        - in: header
+          name: Last-Event-ID
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Потік подій
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/SessionEvent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /sessions/{sessionId}/plan:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [Plans]
+      operationId: getPlan
+      summary: План задач сеансу з графом залежностей та критичним шляхом
+      responses:
+        '200':
+          description: План
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: План ще не сформовано (статус сеансу QUEUED або RUNNING)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /sessions/{sessionId}/plan/tasks/{taskId}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - in: path
+        name: taskId
+        required: true
+        schema:
+          type: string
+          format: uuid
+    patch:
+      tags: [Plans]
+      operationId: updateTask
+      summary: Редагування задачі плану користувачем до затвердження
+      description: >-
+        Доступно ролям OWNER та PLANNER лише у статусі AWAITING_APPROVAL.
+        Оптимістичне блокування за заголовком If-Match (значення поля version).
+      parameters:
+        - in: header
+          name: If-Match
+          required: true
+          description: ETag задачі (RFC 9110) у форматі "<version>", отриманий у заголовку ETag
+          schema:
+            type: string
+            pattern: '^"[1-9][0-9]*"$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskUpdate'
+      responses:
+        '200':
+          description: Оновлена задача
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Нова версія задачі
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          description: Значення If-Match не збігається з поточною версією задачі
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /sessions/{sessionId}/decision:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [Plans]
+      operationId: submitDecision
+      summary: Затвердження або відхилення плану (SRS-FUN-11)
+      description: >-
+        Доступно ролям OWNER та PLANNER лише у статусі AWAITING_APPROVAL.
+        Рішення APPROVE переводить сеанс у APPROVED та записує подію plan.approved в outbox;
+        REJECT переводить сеанс у REJECTED.
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Decision'
+      responses:
+        '202':
+          description: Рішення прийнято
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access JWT, RS256, TTL 15 хв (SRS-NFR-SEC-01)
+
+  parameters:
+    ProjectId:
+      in: path
+      name: projectId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    SessionId:
+      in: path
+      name: sessionId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Page:
+      in: query
+      name: page
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Limit:
+      in: query
+      name: limit
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  schemas:
+    SessionStatus:
+      type: string
+      enum: [QUEUED, RUNNING, AWAITING_APPROVAL, APPROVED, REJECTED, SYNCING, COMPLETED, SYNC_FAILED, FAILED, BUDGET_EXCEEDED]
+    TaskLevel:
+      type: string
+      enum: [EPIC, STORY, TASK]
+    SyncStatus:
+      type: string
+      enum: [PENDING, IN_PROGRESS, SYNCED, FAILED]
+    StoryPoints:
+      type: integer
+      enum: [1, 2, 3, 5, 8, 13, null]
+      nullable: true
+      description: Шкала Фібоначчі; null — оцінку ще не призначено
+
+    AccessToken:
+      type: object
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          example: 900
+
+    Session:
+      type: object
+      required: [id, project_id, status, source_filename, review_iterations, tokens_used, token_budget, cost_usd, version, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/SessionStatus'
+        source_filename:
+          type: string
+          maxLength: 255
+        review_iterations:
+          type: integer
+          minimum: 0
+          maximum: 3
+        tokens_used:
+          type: integer
+          minimum: 0
+        token_budget:
+          type: integer
+          example: 250000
+        cost_usd:
+          type: string
+          pattern: '^\d{1,6}\.\d{4}$'
+          description: NUMERIC(10,4), передається рядком для збереження точності
+          example: '0.8421'
+        error_code:
+          type: string
+          enum: [EMPTY_INPUT, INVALID_LLM_OUTPUT, LLM_UNAVAILABLE, PARTIAL_SYNC, null]
+          nullable: true
+          description: Заповнюється для статусів FAILED та SYNC_FAILED
+        version:
+          type: integer
+          minimum: 1
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    SessionPage:
+      type: object
+      required: [items, page, limit, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Session'
+        page:
+          type: integer
+          minimum: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        total:
+          type: integer
+          minimum: 0
+
+    SessionEvent:
+      type: object
+      required: [session_id, status, emitted_at]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/SessionStatus'
+        node:
+          type: string
+          enum: [planner, estimator, dependency_analyzer, reviewer]
+          nullable: true
+        review_iterations:
+          type: integer
+          minimum: 0
+          maximum: 3
+        tokens_used:
+          type: integer
+          minimum: 0
+        emitted_at:
+          type: string
+          format: date-time
+
+    Task:
+      type: object
+      required: [id, parent_id, level, title, description, story_points, position, sync_status, github_issue_number, depends_on, version]
+      properties:
+        id:
+          type: string
+          format: uuid
+        parent_id:
+          type: string
+          format: uuid
+          nullable: true
+        level:
+          $ref: '#/components/schemas/TaskLevel'
+        title:
+          type: string
+          minLength: 3
+          maxLength: 256
+        description:
+          type: string
+          maxLength: 65536
+        story_points:
+          $ref: '#/components/schemas/StoryPoints'
+        position:
+          type: integer
+          minimum: 0
+        sync_status:
+          $ref: '#/components/schemas/SyncStatus'
+        github_issue_number:
+          type: integer
+          minimum: 1
+          nullable: true
+        depends_on:
+          type: array
+          description: Формується з таблиці task_dependencies (depends_on_task_id)
+          items:
+            type: string
+            format: uuid
+        version:
+          type: integer
+          minimum: 1
+
+    TaskUpdate:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 3
+          maxLength: 256
+        description:
+          type: string
+          maxLength: 65536
+        story_points:
+          $ref: '#/components/schemas/StoryPoints'
+        depends_on:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            format: uuid
+
+    Plan:
+      type: object
+      required: [session_id, tasks, critical_path, critical_path_points, has_cycle]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/Task'
+        critical_path:
+          type: array
+          description: Ідентифікатори задач критичного шляху в порядку виконання
+          items:
+            type: string
+            format: uuid
+        critical_path_points:
+          description: Обчислюється алгоритмом 2.8.2 під час читання плану
+          type: integer
+          minimum: 0
+        has_cycle:
+          type: boolean
+
+    Decision:
+      type: object
+      required: [decision]
+      additionalProperties: false
+      properties:
+        decision:
+          type: string
+          enum: [APPROVE, REJECT]
+        comment:
+          type: string
+          maxLength: 2000
+
+    Problem:
+      type: object
+      description: Problem Details for HTTP APIs (RFC 9457)
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        trace_id:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+        errors:
+          type: array
+          description: Помилки валідації полів (лише для 400)
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+  responses:
+    BadRequest:
+      description: Помилка валідації запиту
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: Відсутній, прострочений або недійсний JWT
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: Роль користувача не дозволяє операцію
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: Ресурс не існує або не належить проєктам користувача (захист від IDOR)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: Операція неможлива в поточному статусі сеансу
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PayloadTooLarge:
+      description: Розмір файлу перевищує 10 485 760 байт
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnsupportedMediaType:
+      description: Тип файлу відмінний від text/markdown та application/pdf
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    TooManyRequests:
+      description: Перевищено ліміт запитів (SRS-NFR-SEC-03)
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Кількість секунд до наступної дозволеної спроби
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ServiceUnavailable:
+      description: Брокер повідомлень або БД недоступні; запит можна повторити
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'

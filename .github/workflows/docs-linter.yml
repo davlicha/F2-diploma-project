@@ -1,0 +1,52 @@
+name: Docs Quality Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "README.md"
+      - ".markdownlint.json"
+      - ".github/workflows/docs-linter.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  markdownlint:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DavidAnson/markdownlint-cli2-action@v20
+        with:
+          config: .markdownlint.json
+          globs: |
+            README.md
+            docs/**/*.md
+
+  style:
+    name: Engineering style check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject colloquial and marketing vocabulary, Cyrillic transliteration of IT terms
+        run: |
+          PATTERN='зручн|крут(ий|а|е|і)|інтуїтивн|красив|унікальн|проривн|джейсон|кафк[аиу]|рест апі|свагер|кубернетес|маркдаун|юскейс|протобуф|джірпсі'
+          if grep -rniE "$PATTERN" docs README.md; then
+            echo "::error::Виявлено неінженерну лексику або транслітерацію термінів"
+            exit 1
+          fi
+          echo "Style check passed"
+
+  openapi:
+    name: OpenAPI contract validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "openapi-spec-validator==0.7.*"
+      - run: openapi-spec-validator docs/api/openapi.yaml
