@@ -15,6 +15,15 @@
 ## Супровідні документи
 
 - [Thesis Proposal](./proposal.md)
+- [Software Requirements Specification (ISO/IEC/IEEE 29148)](./srs.md)
+- [Architecture Decision Records](./adr/)
+  - [ADR-001: Вибір фреймворку оркестрування агентів](./adr/0001-agent-orchestration-framework.md)
+
+## Архітектура (C4 Model)
+
+- [Рівень 1: System Context](./2_design.md#діаграма-рівня-1-system-context)
+- [Рівень 2: Container](./2_design.md#діаграма-рівня-2-container)
+- [Рівень 3: Component — Agent Orchestrator](./2_design.md#діаграма-рівня-3-component-agent-orchestrator)
 
 ## Календарний план
 
